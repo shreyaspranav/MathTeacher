@@ -1,3 +1,4 @@
+import dotenv
 from textwrap import dedent
 
 from typing import Union, TypedDict, List
@@ -5,6 +6,8 @@ from typing import Union, TypedDict, List
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_google_genai import GoogleGenerativeAI
+
+from langchain.tools.tavily_search import TavilySearchResults
 
 from langchain.prompts import PromptTemplate
 
@@ -61,6 +64,9 @@ class MathAgent:
                 """
             )
         )
+
+        # Setting up Tavily search tool 
+        self.search_tool = TavilySearchResults(k=1)
         
         # Solution LLM prompt template
         self.solution_prompt_template = PromptTemplate.from_template(
@@ -71,6 +77,14 @@ class MathAgent:
                 You are given with a math problem to solve and a similar problem will be given based on 
                 the given problem with its solution. Your task is to use the 'guide problem' as an clue
                 to solve the given problem.
+
+                Remember that you should not include any context of the guide problemm in the response.
+                It is only for the given for guidance of the problem providing additional context on the problem
+                in the hopes of getting an accurate and human friendly solution
+
+                Also make sure that:
+                - There is an explanation of the solution as human friendly as possible
+                - The solution is formatted such that it is human readable and free of clutter
 
                 Given Problem: {given_problem}
                 Guide Problem: {guide_problem}
@@ -86,9 +100,7 @@ class MathAgent:
         """
 
         query = state['query']
-        print(f"This is a query +++++++++++++++++++++++++++++++++++ {query}")
         results = self.math_kb_vectordb.similarity_search_with_relevance_scores(query, k=1)
-        print(f"This is fdsajl;fesad;eijfedsa'ijfeausfhds;afdsa {results}")
 
         if results:
             top_doc, top_score = results[0]
@@ -102,14 +114,38 @@ class MathAgent:
             return "web_search_route"
         
     def _web_search(self, state: AgentState) -> AgentState:
+        """
+        This node retrives the solution of a query by searching the internet.
+        """
+        
         print("This is a web search")
-        state['similar_problem'] = ""
-        state['similar_solution'] = ""
+
+        # This results in only one result.
+        result = self.search_tool.run(state['query'])
+
+        if result[0]['score'] > similarity_threshold:
+            state['similar_problem'] = result[0]['title']
+            state['similar_solution'] = result[0]['content']
+        else:
+            # TODO: Choices are: Human in the loop, 
+            state['similar_problem'] = ""
+            state['similar_solution'] = ""
         return state
+    
     def _kb_search(self, state: AgentState) -> AgentState:
+        """
+        This node retrives the solution of a query by searching the knowledge base vector database.
+        """
         print("This is a KB search")
-        state['similar_problem'] = ""
-        state['similar_solution'] = ""
+
+        query = state['query']
+        results = self.math_kb_vectordb.similarity_search_with_relevance_scores(query, k=1)
+
+        if results:
+            top_doc, top_score = results[0]
+            state['similar_problem'] = top_doc.page_content
+            state['similar_solution'] = top_doc.metadata['solution']
+
         return state
 
     def _solution(self, state: AgentState) -> AgentState:
@@ -157,6 +193,7 @@ class MathAgent:
         pass
 
 if __name__ == '__main__':
+    dotenv.load_dotenv()
     m = MathAgent(test=1)
     # m.test(prompt='Why does the sum of all angles in a triangle equal to 180')
     m.build_graph()

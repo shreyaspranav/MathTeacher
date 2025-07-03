@@ -1,6 +1,17 @@
 import streamlit as st
 from datetime import datetime
 import time
+import dotenv
+
+from math_agent import MathAgent
+
+# Load the API Keys
+dotenv.load_dotenv()
+
+
+# Initialize the Math Agent
+agent = MathAgent(test=1)
+agent.build_graph()
 
 # Configure the page
 st.set_page_config(
@@ -43,18 +54,9 @@ def get_ai_response(user_input):
     Mock function that echoes back the user input
     Replace this with your actual AI processing logic
     """
-    # Simulate processing time
-    time.sleep(0.5)
     
-    # For now, just echo back the input with some formatting
-    response = f"""
-        **You asked:** {user_input}
-
-        **AI Response:** I received your question: "{user_input}"
-        
-        This is a test response
-    """
-    return response
+    response = agent.app.invoke({'query': user_input})
+    return response['solution']
 
 # Chat input
 if prompt := st.chat_input("Ask me a math question... (e.g., 'Solve x² + 5x + 6 = 0')"):

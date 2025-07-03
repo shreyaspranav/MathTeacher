@@ -9,3 +9,4 @@ pandas
 google-ai-generativelanguage==0.6.17
 chromadb
 sentence-transformers
+tavily-python
