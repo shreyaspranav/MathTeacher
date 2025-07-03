@@ -290,6 +290,7 @@ class MathAgent:
 
         # This results in only one result.
         result = self.search_tool.run(state['query'])
+        print(f'This is the result{result}')
 
         if result[0]['score'] > similarity_threshold:
             state['similar_problem'] = result[0]['title']
