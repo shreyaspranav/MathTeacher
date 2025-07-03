@@ -38,6 +38,9 @@ class AgentState(TypedDict):
     input_guardrail_pass_score: int
     input_guardrail_explanation: str
 
+    output_guardrail_pass_score: int
+    output_guardrail_explanation: str
+
 class MathAgent:
     # Private / Protected functions: ----------------------
     def __init__(self, test: Union[str, int]):
@@ -149,10 +152,72 @@ class MathAgent:
                 Also make sure that:
                 - There is an explanation of the solution as human friendly as possible
                 - The solution is formatted such that it is human readable and free of clutter
+                - The format of all math equations are in latex
 
                 Given Problem: {given_problem}
                 Guide Problem: {guide_problem}
                 Guide Problem's solution: {guide_solution}
+                """
+            )
+        )
+
+        self.output_guardrail_prompt_template = PromptTemplate.from_template(
+            dedent(
+                """
+                You are an output guardrail evaluator for a math tutoring assistant.
+
+                {format_instructions}
+
+                You are an output safety and quality evaluator for a math tutoring application.
+
+                You will be given:
+                1. A math problem that was asked by a student
+                2. The AI-generated response to that problem
+
+                Your job is to critically assess the **safety, quality, and usefulness** of the AI's response, and return a JSON object with:
+                - "score": an integer between 0 and 100
+                - "explanation": a short explanation of why that score was given
+
+                Scoring Criteria:
+
+                Score higher if:
+                - The response correctly answers the math question
+                - The explanation is step-by-step and educational
+                - The answer is safe, non-toxic, and stays in the math domain
+                - There are no hallucinations, irrelevant info, or broken logic
+
+                Score lower if:
+                - The answer is wrong, vague, or misleading
+                - It uses toxic, biased, or offensive language
+                - It breaks character (e.g., "As an AI model, I can't...") or leaks prompt metadata
+                - It includes non-math content, jokes, or unnecessary fluff
+                - It fabricates math methods or solutions
+
+                Return **only** the following JSON object — do not include any extra commentary:
+                Here is the input:
+                Math query: {user_query}
+                Generated solution: {generated_solution}
+                """
+            )
+        )
+
+        self.output_corrector_prompt_template = PromptTemplate.from_template(
+            dedent(
+                """
+                The previous explanation scored low on quality and correctness. Please revise it to make it:
+                - Mathematically accurate
+                - Step-by-step
+                - Clear and appropriate for a student
+
+                Also make sure that:
+                - There is an explanation of the solution as human friendly as possible
+                - The solution is formatted such that it is human readable and free of clutter
+                - The format of all math equations are in latex
+
+                Here is the original problem: {user_query}
+                Original response: {bad_response}
+
+                Please generate a corrected and improved response.
                 """
             )
         )
@@ -263,6 +328,59 @@ class MathAgent:
 
         state['solution'] = self.llm.invoke(prompt)
         return state
+    
+    def _output_guardrail(self, state: AgentState) -> AgentState:
+        """
+        This node performs a output solution check, scores them and then provides an explanation.
+        """
+        prompt = self.output_guardrail_prompt_template.format(
+            user_query = state['query'],
+            generated_solution = state['solution'],
+            format_instructions = self.input_guardrail_output_format_instructions
+        )
+
+        json_response = self.llm.invoke(prompt)
+        print(json_response)
+
+        try:
+            match = re.search(r'{.*}', json_response, re.DOTALL)
+            parsed = json.loads(match.group())
+            print(f"Parsed Output Guardrail Response: {parsed}")
+            state['output_guardrail_pass_score'] = int(parsed["score"])
+            state['output_guardrail_explanation'] = parsed["explanation"]
+        except json.JSONDecodeError as e:
+            print("Failed to parse LLM response as JSON:", e)
+
+        return state
+    
+    def _output_guardrail_router(self, state: AgentState) -> str:
+        """
+        Routes based on the output guardrail score.
+        If the score is below a threshold, it should route to the correction node.
+        """
+        output_guardrail_score_threshold = 80
+        
+        print(f'Output GuardRail Evaluation Score: {state['output_guardrail_pass_score']}')
+
+        if state['output_guardrail_pass_score'] > output_guardrail_score_threshold:
+            return 'end_route'
+        else:
+            return 'output_corrector_route'
+        
+    def _output_corrector(self, state: AgentState) -> AgentState:
+        """
+        Recorrects the responses if the score of the response is below the threshold
+        """
+
+        prompt = self.output_corrector_prompt_template.format(
+            user_query = state['query'],
+            bad_response = state['solution'],
+        )
+
+        hopefully_correct_response = self.llm.invoke(prompt)
+        state['solution'] = hopefully_correct_response
+
+        return state
 
     def build_graph(self):        
         graph = StateGraph(AgentState)
@@ -273,6 +391,9 @@ class MathAgent:
         graph.add_node('web_search', self._web_search)
         graph.add_node('kb_search', self._kb_search)
         graph.add_node('solution', self._solution)
+        graph.add_node('output_guardrail', self._output_guardrail)
+        graph.add_node('output_guardrail_router', lambda state: state)
+        graph.add_node('output_corrector', self._output_corrector)
 
         graph.add_edge(START, 'input_guardrail')
         graph.add_edge('input_guardrail', 'input_guardrail_router')
@@ -294,7 +415,17 @@ class MathAgent:
         )
         graph.add_edge('kb_search', 'solution')
         graph.add_edge('web_search', 'solution')
-        graph.add_edge('solution', END)
+        graph.add_edge('solution', 'output_guardrail')
+        graph.add_edge('output_guardrail', 'output_guardrail_router')
+        graph.add_conditional_edges(
+            'output_guardrail_router',
+            self._output_guardrail_router,
+            {
+                'end_route': END,
+                'output_corrector_route': 'output_corrector'
+            }
+        )
+        graph.add_edge('output_corrector', END)
 
         self.app = graph.compile()
 
